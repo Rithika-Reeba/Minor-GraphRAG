@@ -1,0 +1,7 @@
+streamlit>=1.38.0
+groq>=0.13.0
+pymupdf>=1.24.0
+python-dotenv>=1.0.1
+networkx>=3.2.1
+neo4j>=5.26.0
+pypdf>=5.0.0
