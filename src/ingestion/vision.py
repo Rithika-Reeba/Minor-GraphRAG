@@ -45,6 +45,8 @@ def analyze_image(image_path: Path) -> dict:
             }
         ],
         temperature=0.1,
+        max_completion_tokens=2048,
+        reasoning_effort="none",
     )
     parsed = parse_json_object(response.choices[0].message.content or "")
     parsed.setdefault("items", [])

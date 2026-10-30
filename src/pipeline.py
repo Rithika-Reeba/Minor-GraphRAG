@@ -2,11 +2,18 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from src.graph_store import add_rel, load_graph, save_graph, sync_to_neo4j, upsert_node
+from src.graph_store import (
+    add_rel,
+    load_graph,
+    save_graph,
+    sync_chunks_to_neo4j,
+    sync_to_neo4j,
+    upsert_node,
+)
 from src.ingestion.documents import chunk_text, extract_pdf_text
 from src.ingestion.vision import analyze_image
 from src.extractor import extract_document_entities
-from src.storage import make_chunk, save_chunks
+from src.storage import load_chunks, make_chunk, save_chunks
 
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
@@ -61,6 +68,7 @@ def ingest_image(person: str, image_path: Path) -> dict:
     save_chunks(person, chunks)
     save_graph(graph)
     neo4j_status = sync_to_neo4j(graph)
+    sync_chunks_to_neo4j(person, chunks)
     return {"analysis": analysis, "graph": graph, "neo4j": neo4j_status}
 
 
@@ -110,6 +118,46 @@ def ingest_document(person: str, doc_path: Path) -> dict:
         )
         add_rel(graph, user_id, edu_id, "STUDIED_AT", evidence=evidence)
 
+    for job in entities.get("experience", []):
+        if not isinstance(job, dict):
+            continue
+        title = (job.get("title") or "").strip()
+        organization = (job.get("organization") or "").strip()
+        if not title and not organization:
+            continue
+        job_name = " at ".join(part for part in [title, organization] if part)
+        job_id = upsert_node(
+            graph,
+            "Experience",
+            job_name,
+            title=title,
+            organization=organization,
+            details=job.get("details", ""),
+        )
+        add_rel(graph, user_id, job_id, "WORKED_AS", evidence=evidence)
+        if organization:
+            org_id = upsert_node(graph, "Organization", organization)
+            add_rel(graph, user_id, org_id, "WORKED_AT", evidence=evidence)
+            add_rel(graph, job_id, org_id, "AT_ORGANIZATION", evidence=evidence)
+        for tech in job.get("technologies", []) or []:
+            tech_id = upsert_node(graph, "Technology", str(tech))
+            add_rel(graph, job_id, tech_id, "USES", evidence=evidence)
+            add_rel(graph, user_id, tech_id, "USES", evidence=evidence)
+
+    for cert in entities.get("certifications", []):
+        name = cert.get("name") if isinstance(cert, dict) else str(cert)
+        if not name:
+            continue
+        cert_id = upsert_node(graph, "Certification", name)
+        add_rel(graph, user_id, cert_id, "EARNED", evidence=evidence)
+
+    for language in entities.get("languages", []):
+        name = language.get("name") if isinstance(language, dict) else str(language)
+        if not name:
+            continue
+        lang_id = upsert_node(graph, "Language", name)
+        add_rel(graph, user_id, lang_id, "SPEAKS", evidence=evidence)
+
     for interest in entities.get("interests", []):
         interest_id = upsert_node(graph, "Interest", str(interest))
         add_rel(graph, user_id, interest_id, "INTERESTED_IN", evidence=evidence)
@@ -122,6 +170,10 @@ def ingest_document(person: str, doc_path: Path) -> dict:
         tech_id = upsert_node(graph, "Technology", str(tech))
         add_rel(graph, user_id, tech_id, "USES", evidence=evidence)
 
+    if entities.get("summary"):
+        summary_id = upsert_node(graph, "Summary", "Professional Summary", text=entities["summary"])
+        add_rel(graph, user_id, summary_id, "HAS_SUMMARY", evidence=evidence)
+
     chunks = [
         make_chunk(person, evidence, piece, "document")
         for piece in chunk_text(text)
@@ -129,6 +181,18 @@ def ingest_document(person: str, doc_path: Path) -> dict:
     save_chunks(person, chunks)
     save_graph(graph)
     neo4j_status = sync_to_neo4j(graph)
+    sync_chunks_to_neo4j(person, chunks)
+
+    entity_count = sum(
+        len(entities.get(key, []) or [])
+        for key in ("skills", "projects", "education", "experience", "certifications", "languages", "interests", "technologies")
+    )
+    if text.strip() and entity_count == 0:
+        raise RuntimeError(
+            f"PDF text was read from {doc_path.name}, but no entities were extracted. "
+            "Try Extract and build graph again."
+        )
+
     return {"entities": entities, "graph": graph, "neo4j": neo4j_status}
 
 
@@ -152,6 +216,9 @@ def build_graph_from_files(person: str, file_paths: list[Path]) -> dict:
             summaries.append(f"Skipped {path.name}: unsupported type")
 
     neo4j_status = sync_to_neo4j(last_graph)
+    chunk_status = sync_chunks_to_neo4j(person, load_chunks(person))
+    if chunk_status:
+        neo4j_status = f"{neo4j_status} {chunk_status}"
     return {
         "person": person,
         "summaries": summaries,

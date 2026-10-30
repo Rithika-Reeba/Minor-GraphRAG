@@ -16,7 +16,7 @@ def groq_client() -> Groq:
 
 
 def parse_json_object(text: str) -> dict[str, Any]:
-    text = text.strip()
+    text = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE).strip()
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
@@ -36,14 +36,24 @@ def parse_json_object(text: str) -> dict[str, Any]:
         return {}
 
 
-def chat_text(prompt: str, system: str = "", temperature: float = 0.2) -> str:
+def chat_text(
+    prompt: str,
+    system: str = "",
+    temperature: float = 0.2,
+    json_mode: bool = False,
+    max_completion_tokens: int = 4096,
+) -> str:
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
-    response = groq_client().chat.completions.create(
-        model=GROQ_TEXT_MODEL,
-        messages=messages,
-        temperature=temperature,
-    )
+    kwargs = {
+        "model": GROQ_TEXT_MODEL,
+        "messages": messages,
+        "temperature": temperature,
+        "max_completion_tokens": max_completion_tokens,
+    }
+    if json_mode:
+        kwargs["response_format"] = {"type": "json_object"}
+    response = groq_client().chat.completions.create(**kwargs)
     return response.choices[0].message.content or ""
